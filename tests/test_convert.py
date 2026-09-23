@@ -2,6 +2,8 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+from tests.helpers import assert_error
+
 CONVERT = "/tools/convert"
 
 
@@ -10,12 +12,6 @@ def convert(client, amount, from_, to, date=None):
     if date:
         params["date"] = date
     return client.get(CONVERT, params=params)
-
-
-def assert_error(response, status, code):
-    assert response.status_code == status
-    assert response.json().keys() == {"error", "message"}
-    assert response.json()["error"] == code
 
 
 def test_converts_with_the_rate_of_the_asked_date(client, upstream):
