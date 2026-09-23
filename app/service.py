@@ -1,0 +1,77 @@
+from datetime import date
+from decimal import ROUND_HALF_UP, Decimal
+from typing import Any
+
+from app.errors import ApiError
+from app.upstream import FrankfurterClient, PublishedRate, RateNotFound
+from app.validation import ConvertRequest
+
+SOURCE = "ECB via frankfurter.dev"
+CENT = Decimal("0.01")
+# Weekends plus the longest ECB holiday run (Easter, Christmas) stay well under
+# a week; a bigger gap means the rate is too old to hand to a customer.
+MAX_FALLBACK_DAYS = 7
+
+
+class ConversionService:
+    def __init__(self, client: FrankfurterClient) -> None:
+        self._client = client
+
+    async def convert(self, request: ConvertRequest) -> dict[str, Any]:
+        published = await self._published_rate(request)
+        _check_rate_date(published.rate_date, request.asked_date)
+        result = (request.amount * published.rate).quantize(CENT, rounding=ROUND_HALF_UP)
+        return {
+            "amount": _json_number(request.amount),
+            "from": request.from_currency,
+            "to": request.to_currency,
+            "rate": _json_number(published.rate),
+            "result": _json_number(result),
+            "rate_date": published.rate_date.isoformat(),
+            "asked_date": request.asked_date.isoformat() if request.asked_date else None,
+            "source": SOURCE,
+            "note": _note(published.rate_date, request.asked_date),
+        }
+
+    async def _published_rate(self, request: ConvertRequest) -> PublishedRate:
+        try:
+            return await self._client.get_rate(request.from_currency, request.to_currency, request.asked_date)
+        except RateNotFound:
+            raise _rate_not_available(request)
+
+
+def _json_number(value: Decimal) -> int | float:
+    # FastAPI would serialise Decimal as a string; the contract says numbers.
+    return int(value) if value == value.to_integral_value() else float(value)
+
+
+def _check_rate_date(rate_date: date, asked_date: date | None) -> None:
+    if asked_date is None:
+        return
+    if rate_date > asked_date:
+        raise ApiError(
+            502, "upstream_bad_response",
+            f"The rate provider returned a rate from {rate_date} for {asked_date}, a later day; no rate was returned.",
+        )
+    if (asked_date - rate_date).days > MAX_FALLBACK_DAYS:
+        raise ApiError(
+            404, "rate_not_available",
+            f"The most recent ECB rate before {asked_date} is from {rate_date}, "
+            f"more than {MAX_FALLBACK_DAYS} days earlier; no rate was returned.",
+        )
+
+
+def _note(rate_date: date, asked_date: date | None) -> str | None:
+    if asked_date is None:
+        return f"No date was asked; this is the latest published ECB rate, from {rate_date}."
+    if rate_date != asked_date:
+        return f"The ECB published no rate for {asked_date}; this is the most recent earlier rate, from {rate_date}."
+    return None
+
+
+def _rate_not_available(request: ConvertRequest) -> ApiError:
+    when = f"on or shortly before {request.asked_date}" if request.asked_date else "at the moment"
+    return ApiError(
+        404, "rate_not_available",
+        f"The ECB has no {request.from_currency} to {request.to_currency} rate {when}; no rate was returned.",
+    )
