@@ -37,7 +37,22 @@ class ConversionService:
         try:
             return await self._client.get_rate(request.from_currency, request.to_currency, request.asked_date)
         except RateNotFound:
-            raise _rate_not_available(request)
+            raise await self._explain_missing_rate(request)
+
+    async def _explain_missing_rate(self, request: ConvertRequest) -> ApiError:
+        # The upstream says "not found" both for unknown codes and for known codes
+        # without a rate on that date; its currency list tells the two apart.
+        try:
+            known = await self._client.get_currencies()
+        except ApiError:
+            return _rate_not_available(request, codes_unverified=True)
+        unknown = [code for code in (request.from_currency, request.to_currency) if code not in known]
+        if unknown:
+            return ApiError(
+                404, "unknown_currency",
+                f"The ECB does not currently publish rates for {' or '.join(unknown)}; check the currency code.",
+            )
+        return _rate_not_available(request)
 
 
 def _json_number(value: Decimal) -> int | float:
@@ -69,9 +84,9 @@ def _note(rate_date: date, asked_date: date | None) -> str | None:
     return None
 
 
-def _rate_not_available(request: ConvertRequest) -> ApiError:
+def _rate_not_available(request: ConvertRequest, codes_unverified: bool = False) -> ApiError:
     when = f"on or shortly before {request.asked_date}" if request.asked_date else "at the moment"
-    return ApiError(
-        404, "rate_not_available",
-        f"The ECB has no {request.from_currency} to {request.to_currency} rate {when}; no rate was returned.",
-    )
+    message = f"The ECB has no {request.from_currency} to {request.to_currency} rate {when}; no rate was returned."
+    if codes_unverified:
+        message += " One of the currency codes may not be supported."
+    return ApiError(404, "rate_not_available", message)
