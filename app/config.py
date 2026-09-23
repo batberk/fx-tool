@@ -8,7 +8,7 @@ DEFAULT_UPSTREAM_BASE = "https://api.frankfurter.dev"
 class Settings:
     upstream_base: str = DEFAULT_UPSTREAM_BASE
     upstream_timeout_seconds: float = 5.0
-    latest_cache_ttl_seconds: float = 15 * 60
+    recent_rate_ttl_seconds: float = 15 * 60
 
     @classmethod
     def from_env(cls) -> "Settings":

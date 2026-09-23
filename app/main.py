@@ -6,6 +6,7 @@ from typing import Any
 import httpx
 from fastapi import FastAPI, Query
 
+from app.cache import TtlCache
 from app.config import Settings
 from app.errors import register_error_handlers
 from app.service import ConversionService
@@ -19,7 +20,7 @@ def create_app(
 ) -> FastAPI:
     settings = settings or Settings.from_env()
     client = FrankfurterClient(settings.upstream_base, settings.upstream_timeout_seconds, transport)
-    service = ConversionService(client)
+    service = ConversionService(client, TtlCache(), settings.recent_rate_ttl_seconds, today=_utc_today)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:

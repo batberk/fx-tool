@@ -1,7 +1,9 @@
-from datetime import date
+from collections.abc import Callable
+from datetime import date, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Any
 
+from app.cache import TtlCache
 from app.errors import ApiError
 from app.upstream import FrankfurterClient, PublishedRate, RateNotFound
 from app.validation import ConvertRequest
@@ -11,11 +13,21 @@ CENT = Decimal("0.01")
 # Weekends plus the longest ECB holiday run (Easter, Christmas) stay well under
 # a week; a bigger gap means the rate is too old to hand to a customer.
 MAX_FALLBACK_DAYS = 7
+CURRENCIES_TTL_SECONDS = 24 * 60 * 60
 
 
 class ConversionService:
-    def __init__(self, client: FrankfurterClient) -> None:
+    def __init__(
+        self,
+        client: FrankfurterClient,
+        cache: TtlCache,
+        recent_rate_ttl_seconds: float,
+        today: Callable[[], date],
+    ) -> None:
         self._client = client
+        self._cache = cache
+        self._recent_rate_ttl_seconds = recent_rate_ttl_seconds
+        self._today = today
 
     async def convert(self, request: ConvertRequest) -> dict[str, Any]:
         published = await self._published_rate(request)
@@ -34,8 +46,13 @@ class ConversionService:
         }
 
     async def _published_rate(self, request: ConvertRequest) -> PublishedRate:
+        key = ("rate", request.from_currency, request.to_currency, request.asked_date)
         try:
-            return await self._client.get_rate(request.from_currency, request.to_currency, request.asked_date)
+            return await self._cache.get_or_fetch(
+                key,
+                lambda: self._client.get_rate(request.from_currency, request.to_currency, request.asked_date),
+                self._rate_ttl(request.asked_date),
+            )
         except RateNotFound:
             raise await self._explain_missing_rate(request)
 
@@ -43,7 +60,7 @@ class ConversionService:
         # The upstream says "not found" both for unknown codes and for known codes
         # without a rate on that date; its currency list tells the two apart.
         try:
-            known = await self._client.get_currencies()
+            known = await self._cache.get_or_fetch("currencies", self._client.get_currencies, CURRENCIES_TTL_SECONDS)
         except ApiError:
             return _rate_not_available(request, codes_unverified=True)
         unknown = [code for code in (request.from_currency, request.to_currency) if code not in known]
@@ -53,6 +70,13 @@ class ConversionService:
                 f"The ECB does not currently publish rates for {' or '.join(unknown)}; check the currency code.",
             )
         return _rate_not_available(request)
+
+    def _rate_ttl(self, asked_date: date | None) -> float | None:
+        # The ECB publishes around 16:00 CET, so "latest", today and yesterday can
+        # still change; anything older is final and can be kept for good.
+        if asked_date is not None and asked_date <= self._today() - timedelta(days=2):
+            return None
+        return self._recent_rate_ttl_seconds
 
 
 def _json_number(value: Decimal) -> int | float:
